@@ -54,6 +54,7 @@ nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
   param(geo_lookup_, "geo_lookup", "provide geo station lookup");
   param(link_stop_distance_, "link_stop_distance",
         "GTFS only: radius to connect stations, 0=skip");
+  param(algo_str_, "algorithm", "the routing algorithm used, possible options: raptor (default) | tripbased");
 }
 
 nigiri::~nigiri() = default;
@@ -76,6 +77,15 @@ void nigiri::init(motis::module::registry& reg) {
 }
 
 void nigiri::import(motis::module::import_dispatcher& reg) {
+  // set the routing algorithm to user specified value
+  if(algo_str_ == "raptor") {
+    algo_ = algorithm::raptor;
+  } else if(algo_str_ == "tripbased") {
+    algo_ = algorithm::tripbased;
+  } else {
+    LOG(logging::warn) << "unknown algorithm option: " << algo_str_ << ", defaulting to raptor";
+  }
+
   impl_ = std::make_unique<impl>();
   std::make_shared<mm::event_collector>(
       get_data_directory().generic_string(), "nigiri", reg,
