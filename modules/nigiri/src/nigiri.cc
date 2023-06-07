@@ -21,6 +21,7 @@
 #include "motis/module/event_collector.h"
 #include "motis/nigiri/geo_station_lookup.h"
 #include "motis/nigiri/routing.h"
+#include "nigiri/routing/tripbased/tb_preprocessing.h"
 
 namespace fs = std::filesystem;
 namespace mm = motis::module;
@@ -44,6 +45,7 @@ struct nigiri::impl {
   std::shared_ptr<cista::wrapped<n::timetable>> tt_;
   std::vector<std::string> tags_;
   geo::point_rtree station_geo_index_;
+  std::shared_ptr<n::routing::tripbased::tb_preprocessing> tbp_;
 };
 
 nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
@@ -55,6 +57,7 @@ nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
   param(link_stop_distance_, "link_stop_distance",
         "GTFS only: radius to connect stations, 0=skip");
   param(algo_str_, "algorithm", "the routing algorithm used, possible options: raptor (default) | tripbased");
+  param(tbp_file_, "tbp_file", "file name used to store/load the result of the trip-based preprocessing, stores/loads <file_name>.transfer_set and <file_name>.bitfields");
 }
 
 nigiri::~nigiri() = default;
@@ -145,6 +148,9 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
 
         auto const data_dir = get_data_directory() / "nigiri";
         auto const dump_file_path = data_dir / fmt::to_string(h);
+        auto const tbp_file_path = data_dir / std::string(tbp_file_);
+        auto const tbp_ts_file_path = fs::path{tbp_file_path.string() + ".transfer_set"};
+        auto const tbp_bf_file_path = fs::path{tbp_file_path.string() + ".bitfields"};
 
         auto loaded = false;
         for (auto i = 0U; i != 2; ++i) {
@@ -221,6 +227,22 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
                            << (*impl_->tt_)->locations_.names_.size()
                            << ", trips=" << (*impl_->tt_)->trip_debug_.size()
                            << "\n";
+
+        // trip-based preprocessing
+        if(algo_ == algorithm::tripbased) {
+          impl_->tbp_ = std::make_shared<n::routing::tripbased::tb_preprocessing>(n::routing::tripbased::tb_preprocessing{**impl_->tt_});
+          if(tbp_file_.empty()) {
+            // no store/load
+            impl_->tbp_->build_transfer_set();
+          } else if(fs::is_regular_file(tbp_ts_file_path) && fs::is_regular_file(tbp_bf_file_path)) {
+            // load
+            impl_->tbp_->load_transfer_set(tbp_file_path);
+          } else {
+            // build & store
+            impl_->tbp_->build_transfer_set();
+            impl_->tbp_->store_transfer_set(tbp_file_path);
+          }
+        }
 
         if (geo_lookup_) {
           impl_->station_geo_index_ =

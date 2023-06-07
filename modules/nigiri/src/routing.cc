@@ -13,6 +13,8 @@
 #include "nigiri/routing/raptor/raptor_state.h"
 #include "nigiri/routing/search.h"
 #include "nigiri/special_stations.h"
+#include "nigiri/routing/tripbased/tb_query.h"
+#include "nigiri/routing/tripbased/tb_query_state.h"
 
 #include "motis/core/common/timing.h"
 #include "motis/core/journey/journeys_to_message.h"
@@ -29,6 +31,9 @@ boost::thread_specific_ptr<n::routing::search_state> search_state;
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 boost::thread_specific_ptr<n::routing::raptor_state> raptor_state;
+
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+boost::thread_specific_ptr<n::routing::tripbased::tb_query_state> tb_query_state;
 
 namespace motis::nigiri {
 
@@ -133,6 +138,12 @@ auto run_search(n::routing::search_state& search_state,
   return n::routing::search<SearchDir, algo_t>{tt, search_state, raptor_state,
                                                std::move(q)}
       .execute();
+}
+
+auto run_search(n::routing::search_state& search_state,
+                n::routing::tripbased::tb_query_state& tb_query_state, n::timetable const& tt, n::routing::query&& q) {
+  using algo_t = n::routing::tripbased::tb_query;
+  return n::routing::search<n::direction::kForward, algo_t>{tt, search_state, tb_query_state, std::move(q)};
 }
 
 motis::module::msg_ptr route(std::vector<std::string> const& tags,

@@ -39,6 +39,7 @@ private:
   unsigned link_stop_distance_{100U};
   std::string algo_str_;
   algorithm algo_{algorithm::raptor};
+  std::string tbp_file_;
 };
 
 }  // namespace motis::nigiri
