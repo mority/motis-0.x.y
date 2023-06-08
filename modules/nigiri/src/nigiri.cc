@@ -45,7 +45,7 @@ struct nigiri::impl {
   std::shared_ptr<cista::wrapped<n::timetable>> tt_;
   std::vector<std::string> tags_;
   geo::point_rtree station_geo_index_;
-  std::shared_ptr<n::routing::tripbased::tb_preprocessing> tbp_;
+  std::shared_ptr<cista::wrapped<n::routing::tripbased::tb_preprocessing>> tbp_;
 };
 
 nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
@@ -56,8 +56,7 @@ nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
   param(geo_lookup_, "geo_lookup", "provide geo station lookup");
   param(link_stop_distance_, "link_stop_distance",
         "GTFS only: radius to connect stations, 0=skip");
-  param(algo_str_, "algorithm", "the routing algorithm used, possible options: raptor (default) | tripbased");
-  param(tbp_file_, "tbp_file", "file name used to store/load the result of the trip-based preprocessing, stores/loads <file_name>.transfer_set and <file_name>.bitfields");
+  param(algo_str_, "algorithm", "the routing algorithm used (default: raptor), possible options: raptor | tripbased");
 }
 
 nigiri::~nigiri() = default;
@@ -83,10 +82,12 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
   // set the routing algorithm to user specified value
   if(algo_str_ == "raptor") {
     algo_ = algorithm::raptor;
+    LOG(logging::info) << "nigiri routing algorithm: " << algo_str_ << "\n";
   } else if(algo_str_ == "tripbased") {
     algo_ = algorithm::tripbased;
+    LOG(logging::info) << "nigiri routing algorithm: " << algo_str_ << "\n";
   } else {
-    LOG(logging::warn) << "unknown algorithm option: " << algo_str_ << ", defaulting to raptor";
+    LOG(logging::warn) << "unknown routing algorithm option: " << algo_str_ << ", defaulting to raptor\n";
   }
 
   impl_ = std::make_unique<impl>();
@@ -148,14 +149,12 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
 
         auto const data_dir = get_data_directory() / "nigiri";
         auto const dump_file_path = data_dir / fmt::to_string(h);
-        auto const tbp_file_path = data_dir / std::string(tbp_file_);
-        auto const tbp_ts_file_path = fs::path{tbp_file_path.string() + ".transfer_set"};
-        auto const tbp_bf_file_path = fs::path{tbp_file_path.string() + ".bitfields"};
+        auto const tbp_file_path = data_dir / fmt::to_string(h) += ".tbp";
 
         auto loaded = false;
         for (auto i = 0U; i != 2; ++i) {
           // Parse from input files and write memory image.
-          if (no_cache_ || !fs::is_regular_file(dump_file_path)) {
+          if (no_cache_ || !fs::is_regular_file(dump_file_path) || (algo_ == algorithm::tripbased && !fs::is_regular_file(tbp_file_path))) {
             impl_->tt_ = std::make_shared<cista::wrapped<n::timetable>>(
                 cista::raw::make_unique<n::timetable>());
 
@@ -187,6 +186,17 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
 
             n::loader::finalize(**impl_->tt_);
 
+            if(algo_ == algorithm::tripbased) {
+              impl_->tbp_ = std::make_shared<cista::wrapped<n::routing::tripbased::tb_preprocessing>>(cista::raw::make_unique<n::routing::tripbased::tb_preprocessing>(**impl_->tt_));
+              LOG(logging::info) << "nigiri trip-based preprocessing: building transfer set" << "\n";
+              auto progress_tracker = utl::activate_progress_tracker("trip-based preprocessing");
+              progress_tracker->show_progress(true);
+              (*impl_->tbp_)->build_transfer_set();
+              progress_tracker->status("FINISHED").show_progress(false);
+              utl::verify((*impl_->tbp_)->ts_ready_, "nigiri trip-based preprocessing failed");
+              LOG(logging::info) << "nigiri trip-based preprocessing: found " << (*impl_->tbp_)->n_transfers_ << " transfers" << "\n";
+            }
+
             if (no_cache_) {
               loaded = true;
               break;
@@ -194,6 +204,9 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
               // Write to disk, next step: read from disk.
               std::filesystem::create_directories(data_dir);
               (*impl_->tt_)->write(dump_file_path);
+              if(algo_ == algorithm::tripbased) {
+                (*impl_->tbp_)->write(tbp_file_path);
+              }
             }
           }
 
@@ -205,12 +218,20 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
                       cista::file{dump_file_path.string().c_str(), "r"}
                           .content()}));
               (**impl_->tt_).locations_.resolve_timezones();
+              if(algo_ == algorithm::tripbased) {
+                impl_->tbp_ = std::make_shared<cista::wrapped<n::routing::tripbased::tb_preprocessing>>(
+                    n::routing::tripbased::tb_preprocessing::read(cista::memory_holder{
+                    cista::file{tbp_file_path.string().c_str(), "r"}.content()}));
+              }
               loaded = true;
               break;
             } catch (std::exception const& e) {
               LOG(logging::error)
                   << "cannot read cached timetable image: " << e.what();
               std::filesystem::remove(dump_file_path);
+              if(algo_ == algorithm::tripbased) {
+                std::filesystem::remove(tbp_file_path);
+              }
               continue;
             }
           }
@@ -228,20 +249,8 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
                            << ", trips=" << (*impl_->tt_)->trip_debug_.size()
                            << "\n";
 
-        // trip-based preprocessing
         if(algo_ == algorithm::tripbased) {
-          impl_->tbp_ = std::make_shared<n::routing::tripbased::tb_preprocessing>(n::routing::tripbased::tb_preprocessing{**impl_->tt_});
-          if(tbp_file_.empty()) {
-            // no store/load
-            impl_->tbp_->build_transfer_set();
-          } else if(fs::is_regular_file(tbp_ts_file_path) && fs::is_regular_file(tbp_bf_file_path)) {
-            // load
-            impl_->tbp_->load_transfer_set(tbp_file_path);
-          } else {
-            // build & store
-            impl_->tbp_->build_transfer_set();
-            impl_->tbp_->store_transfer_set(tbp_file_path);
-          }
+          LOG(logging::info) << "nigiri tripbased preprocessing: transfers=" << (*impl_->tbp_)->n_transfers_ << "\n";
         }
 
         if (geo_lookup_) {
