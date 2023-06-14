@@ -21,7 +21,7 @@
 #include "motis/module/event_collector.h"
 #include "motis/nigiri/geo_station_lookup.h"
 #include "motis/nigiri/routing.h"
-#include "nigiri/routing/tripbased/tb_preprocessing.h"
+#include "nigiri/routing/tripbased/tb_preprocessor.h"
 
 namespace fs = std::filesystem;
 namespace mm = motis::module;
@@ -45,7 +45,7 @@ struct nigiri::impl {
   std::shared_ptr<cista::wrapped<n::timetable>> tt_;
   std::vector<std::string> tags_;
   geo::point_rtree station_geo_index_;
-  std::shared_ptr<cista::wrapped<n::routing::tripbased::tb_preprocessing>> tbp_;
+  std::shared_ptr<cista::wrapped<n::routing::tripbased::transfer_set>> ts_;
 };
 
 nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
@@ -56,9 +56,8 @@ nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
   param(geo_lookup_, "geo_lookup", "provide geo station lookup");
   param(link_stop_distance_, "link_stop_distance",
         "GTFS only: radius to connect stations, 0=skip");
-  param(algo_str_, "algorithm",
-        "the routing algorithm used (default: raptor), possible options: "
-        "raptor | tripbased");
+  param(build_transfer_set_, "build_transfer_set",
+        "enable mandatory preprocessing step for trip-based routing");
 }
 
 nigiri::~nigiri() = default;
@@ -66,20 +65,22 @@ nigiri::~nigiri() = default;
 void nigiri::init(motis::module::registry& reg) {
   reg.register_op("/nigiri",
                   [&](mm::msg_ptr const& msg) {
-                    return route(impl_->tags_, **impl_->tt_, nullptr, msg);
+                    return route(impl_->tags_, **impl_->tt_, msg);
                   },
                   {});
   reg.register_op("/nigiri/raptor",
                   [&](mm::msg_ptr const& msg) {
-                    return route(impl_->tags_, **impl_->tt_, nullptr, msg);
+                    return route(impl_->tags_, **impl_->tt_, msg);
                   },
                   {});
-  reg.register_op("/nigiri/tripbased",
-                  [&](mm::msg_ptr const& msg) {
-                    return route(impl_->tags_, **impl_->tt_, &(**impl_->tbp_),
-                                 msg);
-                  },
-                  {});
+  if (build_transfer_set_) {
+    reg.register_op("/nigiri/tripbased",
+                    [&](mm::msg_ptr const& msg) {
+                      return route(impl_->tags_, **impl_->tt_, msg,
+                                   &(**impl_->ts_));
+                    },
+                    {});
+  }
   if (geo_lookup_) {
     reg.register_op("/lookup/geo_station",
                     [&](mm::msg_ptr const& msg) {
@@ -91,17 +92,6 @@ void nigiri::init(motis::module::registry& reg) {
 }
 
 void nigiri::import(motis::module::import_dispatcher& reg) {
-  // set the routing algorithm to user specified value
-  if (algo_str_ == "raptor") {
-    algo_ = algorithm::raptor;
-    LOG(logging::info) << "nigiri routing algorithm: " << algo_str_ << "\n";
-  } else if (algo_str_ == "tripbased") {
-    algo_ = algorithm::tripbased;
-    LOG(logging::info) << "nigiri routing algorithm: " << algo_str_ << "\n";
-  } else {
-    LOG(logging::warn) << "unknown routing algorithm option: " << algo_str_
-                       << ", defaulting to raptor\n";
-  }
 
   impl_ = std::make_unique<impl>();
   std::make_shared<mm::event_collector>(
@@ -162,14 +152,15 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
 
         auto const data_dir = get_data_directory() / "nigiri";
         auto const dump_file_path = data_dir / fmt::to_string(h);
-        auto const tbp_file_path = data_dir / fmt::to_string(h) += ".tbp";
+        auto const transfer_set_file_path = data_dir / fmt::to_string(h) +=
+            ".transfer_set";
 
         auto loaded = false;
         for (auto i = 0U; i != 2; ++i) {
           // Parse from input files and write memory image.
           if (no_cache_ || !fs::is_regular_file(dump_file_path) ||
-              (algo_ == algorithm::tripbased &&
-               !fs::is_regular_file(tbp_file_path))) {
+              (build_transfer_set_ &&
+               !fs::is_regular_file(transfer_set_file_path))) {
             impl_->tt_ = std::make_shared<cista::wrapped<n::timetable>>(
                 cista::raw::make_unique<n::timetable>());
 
@@ -201,24 +192,21 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
 
             n::loader::finalize(**impl_->tt_);
 
-            if (algo_ == algorithm::tripbased) {
-              impl_->tbp_ = std::make_shared<
-                  cista::wrapped<n::routing::tripbased::tb_preprocessing>>(
+            if (build_transfer_set_) {
+              impl_->ts_ = std::make_shared<
+                  cista::wrapped<n::routing::tripbased::transfer_set>>(
                   cista::raw::make_unique<
-                      n::routing::tripbased::tb_preprocessing>(**impl_->tt_));
-              LOG(logging::info)
-                  << "nigiri trip-based preprocessing: building transfer set"
-                  << "\n";
+                      n::routing::tripbased::transfer_set>());
               auto progress_tracker =
                   utl::activate_progress_tracker("trip-based preprocessing");
               progress_tracker->show_progress(true);
-              (*impl_->tbp_)->build_transfer_set();
+              n::routing::tripbased::build_transfer_set(**impl_->tt_,
+                                                        **impl_->ts_);
               progress_tracker->status("FINISHED").show_progress(false);
-              utl::verify((*impl_->tbp_)->ts_ready_,
+              utl::verify((*impl_->ts_)->ready_,
                           "nigiri trip-based preprocessing failed");
-              LOG(logging::info) << "nigiri trip-based preprocessing: found "
-                                 << (*impl_->tbp_)->n_transfers_ << " transfers"
-                                 << "\n";
+              LOG(logging::info)
+                  << "built transfer set, hash: " << (*impl_->ts_)->hash();
             }
 
             if (no_cache_) {
@@ -228,8 +216,8 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
               // Write to disk, next step: read from disk.
               std::filesystem::create_directories(data_dir);
               (*impl_->tt_)->write(dump_file_path);
-              if (algo_ == algorithm::tripbased) {
-                (*impl_->tbp_)->write(tbp_file_path);
+              if (build_transfer_set_) {
+                (*impl_->ts_)->write(transfer_set_file_path);
               }
             }
           }
@@ -242,13 +230,21 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
                       cista::file{dump_file_path.string().c_str(), "r"}
                           .content()}));
               (**impl_->tt_).locations_.resolve_timezones();
-              if (algo_ == algorithm::tripbased) {
-                impl_->tbp_ = std::make_shared<
-                    cista::wrapped<n::routing::tripbased::tb_preprocessing>>(
-                    n::routing::tripbased::tb_preprocessing::read(
-                        cista::memory_holder{
-                            cista::file{tbp_file_path.string().c_str(), "r"}
-                                .content()}));
+              if (build_transfer_set_) {
+                impl_->ts_ = std::make_shared<
+                    cista::wrapped<n::routing::tripbased::transfer_set>>(
+                    n::routing::tripbased::transfer_set::read(
+                        cista::memory_holder{cista::file{
+                            transfer_set_file_path.string().c_str(), "r"}
+                                                 .content()}));
+                bool tt_hash_match =
+                    (*impl_->ts_)->tt_hash_ ==
+                    n::routing::tripbased::hash_tt(**impl_->tt_);
+                utl::verify(tt_hash_match,
+                            "hash of loaded timetable does not match timetable "
+                            "hash of transfer set");
+                LOG(logging::info)
+                    << "loaded transfer set, hash: " << (*impl_->ts_)->hash();
               }
               loaded = true;
               break;
@@ -256,8 +252,8 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
               LOG(logging::error)
                   << "cannot read cached timetable image: " << e.what();
               std::filesystem::remove(dump_file_path);
-              if (algo_ == algorithm::tripbased) {
-                std::filesystem::remove(tbp_file_path);
+              if (build_transfer_set_) {
+                std::filesystem::remove(transfer_set_file_path);
               }
               continue;
             }
@@ -276,9 +272,9 @@ void nigiri::import(motis::module::import_dispatcher& reg) {
                            << ", trips=" << (*impl_->tt_)->trip_debug_.size()
                            << "\n";
 
-        if (algo_ == algorithm::tripbased) {
+        if (build_transfer_set_) {
           LOG(logging::info) << "nigiri tripbased preprocessing: transfers="
-                             << (*impl_->tbp_)->n_transfers_ << "\n";
+                             << (*impl_->ts_)->n_transfers_;
         }
 
         if (geo_lookup_) {

@@ -10,14 +10,14 @@ struct timetable;
 }
 
 namespace nigiri::routing::tripbased {
-struct tb_preprocessing;
+struct transfer_set;
 }
 
 namespace motis::nigiri {
 
 motis::module::msg_ptr route(
     std::vector<std::string> const& tags, ::nigiri::timetable& tt,
-    ::nigiri::routing::tripbased::tb_preprocessing* tbp,
-    motis::module::msg_ptr const& msg);
+    motis::module::msg_ptr const& msg,
+    ::nigiri::routing::tripbased::transfer_set const* ts = nullptr);
 
 }  // namespace motis::nigiri

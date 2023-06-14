@@ -12,7 +12,7 @@
 #include "nigiri/routing/raptor/raptor.h"
 #include "nigiri/routing/raptor/raptor_state.h"
 #include "nigiri/routing/search.h"
-#include "nigiri/routing/tripbased/tb_query.h"
+#include "nigiri/routing/tripbased/tb_query_engine.h"
 #include "nigiri/routing/tripbased/tb_query_state.h"
 #include "nigiri/special_stations.h"
 
@@ -183,7 +183,7 @@ auto run_search(n::routing::search_state& search_state,
 auto run_search(n::routing::search_state& search_state,
                 n::routing::tripbased::tb_query_state& tb_query_state,
                 n::timetable const& tt, n::routing::query&& q) {
-  using algo_t = n::routing::tripbased::tb_query;
+  using algo_t = n::routing::tripbased::tb_query_engine;
   return n::routing::search<n::direction::kForward, algo_t>{
       tt, search_state, tb_query_state, std::move(q)}
       .execute();
@@ -191,8 +191,8 @@ auto run_search(n::routing::search_state& search_state,
 
 motis::module::msg_ptr route(
     std::vector<std::string> const& tags, n::timetable& tt,
-    ::nigiri::routing::tripbased::tb_preprocessing* const tbp,
-    motis::module::msg_ptr const& msg) {
+    motis::module::msg_ptr const& msg,
+    ::nigiri::routing::tripbased::transfer_set const* const ts) {
   using motis::routing::RoutingRequest;
   auto const req = motis_content(RoutingRequest, msg);
 
@@ -325,7 +325,7 @@ motis::module::msg_ptr route(
     search_state.reset(new n::routing::search_state{});
   }
 
-  if (tbp) {
+  if (ts) {
     // tripbased routing
 
     if (tb_query_state.get() == nullptr) {
@@ -338,7 +338,7 @@ motis::module::msg_ptr route(
                           .from_)
                     .first;
       tb_query_state.reset(
-          new n::routing::tripbased::tb_query_state{*tbp, base});
+          new n::routing::tripbased::tb_query_state{tt, *ts, base});
     }
 
     MOTIS_START_TIMING(routing);

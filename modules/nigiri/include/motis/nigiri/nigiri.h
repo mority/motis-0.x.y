@@ -8,11 +8,6 @@
 
 namespace motis::nigiri {
 
-enum class algorithm{
-  raptor,
-  tripbased
-};
-
 struct nigiri : public motis::module::module {
   nigiri();
   ~nigiri() override;
@@ -37,8 +32,7 @@ private:
   std::uint16_t num_days_{2U};
   bool geo_lookup_{false};
   unsigned link_stop_distance_{100U};
-  std::string algo_str_;
-  algorithm algo_{algorithm::raptor};
+  bool build_transfer_set_{false};
 };
 
 }  // namespace motis::nigiri
