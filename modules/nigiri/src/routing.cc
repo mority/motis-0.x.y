@@ -185,7 +185,7 @@ auto run_search(n::routing::search_state& search_state,
                 n::timetable const& tt, n::routing::query&& q) {
   using algo_t = n::routing::tripbased::tb_query_engine;
   return n::routing::search<n::direction::kForward, algo_t>{
-      tt, search_state, tb_query_state, std::move(q)}
+      tt, nullptr, search_state, tb_query_state, std::move(q)}
       .execute();
 }
 
