@@ -450,3 +450,5 @@ if (MOTIS_COV)
   )
   add_dependencies(coverage motis-test motis-itest)
 endif()
+
+add_link_options("-fuse-ld=mold")
