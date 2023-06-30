@@ -96,7 +96,7 @@ mm::msg_ptr to_routing_response(
 }
 
 mm::msg_ptr to_routing_response(
-    n::timetable const& tt, std::vector<std::string> const& tags,
+    n::timetable const& tt, n::rt_timetable const* rtt, tag_lookup const& tags,
     n::pareto_set<n::routing::journey> const* journeys,
     n::interval<n::unixtime_t> search_interval,
     n::routing::search_stats const& search_stats,
@@ -106,7 +106,7 @@ mm::msg_ptr to_routing_response(
   MOTIS_START_TIMING(conversion);
   auto const connections =
       utl::to_vec(*journeys, [&](n::routing::journey const& j) {
-        return to_connection(fbb, nigiri_to_motis_journey(tt, tags, j));
+        return to_connection(fbb, nigiri_to_motis_journey(tt, rtt, tags, j));
       });
   MOTIS_STOP_TIMING(conversion);
 
@@ -187,12 +187,10 @@ auto run_search(n::routing::search_state& search_state,
   }
 }
 
-motis::module::msg_ptr route(tag_lookup const& tags, n::timetable& tt,
-                             n::rt_timetable const* rtt,
-                             motis::module::msg_ptr const& msg) {
 auto run_search(n::routing::search_state& search_state,
                 n::routing::tripbased::tb_query_state& tb_query_state,
-                n::timetable const& tt, n::routing::query&& q) {
+                n::timetable const& tt, n::rt_timetable const* rtt,
+                n::routing::query&& q) {
   using algo_t = n::routing::tripbased::tb_query_engine;
   return n::routing::search<n::direction::kForward, algo_t>{
       tt, nullptr, search_state, tb_query_state, std::move(q)}
@@ -200,9 +198,14 @@ auto run_search(n::routing::search_state& search_state,
 }
 
 motis::module::msg_ptr route(
-    std::vector<std::string> const& tags, n::timetable& tt,
+    tag_lookup const& tags, n::timetable& tt, n::rt_timetable const* rtt,
     motis::module::msg_ptr const& msg,
     ::nigiri::routing::tripbased::transfer_set const* const ts) {
+
+  // motis::module::msg_ptr route(
+  //     std::vector<std::string> const& tags, n::timetable& tt,
+  //     motis::module::msg_ptr const& msg,
+  //     ::nigiri::routing::tripbased::transfer_set const* const ts) {
   using motis::routing::RoutingRequest;
   auto const req = motis_content(RoutingRequest, msg);
 
@@ -358,14 +361,15 @@ motis::module::msg_ptr route(
     n::pareto_set<n::routing::journey> const* journeys{nullptr};
     n::routing::search_stats search_stats;
     n::routing::tripbased::tb_query_stats tb_query_stats;
-    auto const r = run_search(*search_state, *tb_query_state, tt, std::move(q));
+    auto const r =
+        run_search(*search_state, *tb_query_state, tt, rtt, std::move(q));
     journeys = r.journeys_;
     search_stats = r.search_stats_;
     tb_query_stats = r.algo_stats_;
     search_interval = r.interval_;
     MOTIS_STOP_TIMING(routing);
 
-    return to_routing_response(tt, tags, journeys, search_interval,
+    return to_routing_response(tt, rtt, tags, journeys, search_interval,
                                search_stats, tb_query_stats,
                                MOTIS_TIMING_MS(routing));
 
@@ -376,31 +380,32 @@ motis::module::msg_ptr route(
       raptor_state.reset(new n::routing::raptor_state{});
     }
 
-  MOTIS_START_TIMING(routing);
-  auto search_interval = n::interval<n::unixtime_t>{};
-  n::pareto_set<n::routing::journey> const* journeys{nullptr};
-  n::routing::search_stats search_stats;
-  n::routing::raptor_stats raptor_stats;
-  if (req->search_dir() == SearchDir_Forward) {
-    auto const r = run_search<n::direction::kForward>(
-        *search_state, *raptor_state, tt, rtt, std::move(q));
-    journeys = r.journeys_;
-    search_stats = r.search_stats_;
-    raptor_stats = r.algo_stats_;
-    search_interval = r.interval_;
-  } else {
-    auto const r = run_search<n::direction::kBackward>(
-        *search_state, *raptor_state, tt, rtt, std::move(q));
-    journeys = r.journeys_;
-    search_stats = r.search_stats_;
-    raptor_stats = r.algo_stats_;
-    search_interval = r.interval_;
-  }
-  MOTIS_STOP_TIMING(routing);
+    MOTIS_START_TIMING(routing);
+    auto search_interval = n::interval<n::unixtime_t>{};
+    n::pareto_set<n::routing::journey> const* journeys{nullptr};
+    n::routing::search_stats search_stats;
+    n::routing::raptor_stats raptor_stats;
+    if (req->search_dir() == SearchDir_Forward) {
+      auto const r = run_search<n::direction::kForward>(
+          *search_state, *raptor_state, tt, rtt, std::move(q));
+      journeys = r.journeys_;
+      search_stats = r.search_stats_;
+      raptor_stats = r.algo_stats_;
+      search_interval = r.interval_;
+    } else {
+      auto const r = run_search<n::direction::kBackward>(
+          *search_state, *raptor_state, tt, rtt, std::move(q));
+      journeys = r.journeys_;
+      search_stats = r.search_stats_;
+      raptor_stats = r.algo_stats_;
+      search_interval = r.interval_;
+    }
+    MOTIS_STOP_TIMING(routing);
 
-  return to_routing_response(tt, rtt, tags, journeys, search_interval,
-                             search_stats, raptor_stats,
-                             MOTIS_TIMING_MS(routing));
+    return to_routing_response(tt, rtt, tags, journeys, search_interval,
+                               search_stats, raptor_stats,
+                               MOTIS_TIMING_MS(routing));
+  }
 }
 
 }  // namespace motis::nigiri
