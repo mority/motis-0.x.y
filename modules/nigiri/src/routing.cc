@@ -339,6 +339,8 @@ motis::module::msg_ptr route(
                     .first;
       tb_query_state.reset(
           new n::routing::tripbased::tb_query_state{tt, *ts, base});
+    } else {
+      tb_query_state->new_query_reset();
     }
 
     MOTIS_START_TIMING(routing);
