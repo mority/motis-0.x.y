@@ -189,8 +189,7 @@ auto run_search(n::routing::search_state& search_state,
 
 auto run_search(n::routing::search_state& search_state,
                 n::routing::tripbased::tb_query_state& tb_query_state,
-                n::timetable const& tt, n::rt_timetable const* rtt,
-                n::routing::query&& q) {
+                n::timetable const& tt, n::routing::query&& q) {
   using algo_t = n::routing::tripbased::tb_query_engine;
   return n::routing::search<n::direction::kForward, algo_t>{
       tt, nullptr, search_state, tb_query_state, std::move(q)}
@@ -361,8 +360,7 @@ motis::module::msg_ptr route(
     n::pareto_set<n::routing::journey> const* journeys{nullptr};
     n::routing::search_stats search_stats;
     n::routing::tripbased::tb_query_stats tb_query_stats;
-    auto const r =
-        run_search(*search_state, *tb_query_state, tt, rtt, std::move(q));
+    auto const r = run_search(*search_state, *tb_query_state, tt, std::move(q));
     journeys = r.journeys_;
     search_stats = r.search_stats_;
     tb_query_stats = r.algo_stats_;
