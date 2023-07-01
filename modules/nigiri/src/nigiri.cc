@@ -44,6 +44,29 @@ struct nigiri::impl {
     loaders_.emplace_back(
         std::make_unique<n::loader::hrd::hrd_5_20_avv_loader>());
   }
+
+  void update_rtt(std::shared_ptr<n::rt_timetable>&& rtt) {
+#if __cpp_lib_atomic_shared_ptr  // not yet supported on macos
+    rtt_.store(rtt);
+#else
+    auto lock = std::lock_guard{mutex_};
+    rtt_ = rtt;
+#endif
+  }
+
+  std::shared_ptr<n::rt_timetable> get_rtt() {
+#if __cpp_lib_atomic_shared_ptr  // not yet supported on macos
+    return rtt_.load();
+#else
+    std::shared_ptr<n::rt_timetable> copy;
+    {
+      auto const lock = std::lock_guard{mutex_};
+      copy = rtt_;
+    }
+    return copy;
+#endif
+  }
+
   std::vector<std::unique_ptr<n::loader::loader_interface>> loaders_;
   std::shared_ptr<cista::wrapped<n::timetable>> tt_;
 #if __cpp_lib_atomic_shared_ptr  // not yet supported on macos
@@ -54,8 +77,8 @@ struct nigiri::impl {
 #endif
   tag_lookup tags_;
   geo::point_rtree station_geo_index_;
-  std::shared_ptr<cista::wrapped<n::routing::tripbased::transfer_set>> ts_;
   std::vector<gtfsrt> gtfsrt_;
+  std::shared_ptr<cista::wrapped<n::routing::tripbased::transfer_set>> ts_;
 };
 
 nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
@@ -84,13 +107,15 @@ void nigiri::init(motis::module::registry& reg) {
                   {});
   reg.register_op("/nigiri/raptor",
                   [&](mm::msg_ptr const& msg) {
-                    return route(impl_->tags_, **impl_->tt_, msg);
+                    return route(impl_->tags_, **impl_->tt_,
+                                 impl_->get_rtt().get(), msg);
                   },
                   {});
   if (build_transfer_set_) {
     reg.register_op("/nigiri/tripbased",
                     [&](mm::msg_ptr const& msg) {
-                      return route(impl_->tags_, **impl_->tt_, msg,
+                      return route(impl_->tags_, **impl_->tt_,
+                                   impl_->get_rtt().get(), msg,
                                    &(**impl_->ts_));
                     },
                     {});
