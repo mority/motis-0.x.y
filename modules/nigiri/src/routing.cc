@@ -201,10 +201,6 @@ motis::module::msg_ptr route(
     motis::module::msg_ptr const& msg,
     ::nigiri::routing::tripbased::transfer_set const* const ts) {
 
-  // motis::module::msg_ptr route(
-  //     std::vector<std::string> const& tags, n::timetable& tt,
-  //     motis::module::msg_ptr const& msg,
-  //     ::nigiri::routing::tripbased::transfer_set const* const ts) {
   using motis::routing::RoutingRequest;
   auto const req = motis_content(RoutingRequest, msg);
 
@@ -341,18 +337,7 @@ motis::module::msg_ptr route(
     // tripbased routing
 
     if (tb_query_state.get() == nullptr) {
-      auto const base =
-          std::holds_alternative<::nigiri::unixtime_t>(start_time)
-              ? tt.day_idx_mam(std::get<::nigiri::unixtime_t>(start_time)).first
-              : tt.day_idx_mam(
-                      std::get<::nigiri::interval<::nigiri::unixtime_t>>(
-                          start_time)
-                          .from_)
-                    .first;
-      tb_query_state.reset(
-          new n::routing::tripbased::tb_query_state{tt, *ts, base});
-    } else {
-      tb_query_state->new_query_reset();
+      tb_query_state.reset(new n::routing::tripbased::tb_query_state{tt, *ts});
     }
 
     MOTIS_START_TIMING(routing);
