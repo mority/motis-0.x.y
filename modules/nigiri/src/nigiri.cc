@@ -28,10 +28,10 @@
 #include "motis/nigiri/initial_permalink.h"
 #include "motis/nigiri/railviz.h"
 #include "motis/nigiri/routing.h"
-#include "nigiri/routing/tripbased/tb_preprocessor.h"
 #include "motis/nigiri/station_lookup.h"
 #include "motis/nigiri/trip_to_connection.h"
 #include "motis/nigiri/unixtime_conv.h"
+#include "nigiri/routing/tripbased/preprocessing/preprocessor.h"
 #include "utl/parser/split.h"
 
 namespace fs = std::filesystem;

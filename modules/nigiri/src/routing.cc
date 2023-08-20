@@ -12,8 +12,8 @@
 #include "nigiri/routing/raptor/raptor.h"
 #include "nigiri/routing/raptor/raptor_state.h"
 #include "nigiri/routing/search.h"
-#include "nigiri/routing/tripbased/tb_query_engine.h"
-#include "nigiri/routing/tripbased/tb_query_state.h"
+#include "nigiri/routing/tripbased/query/query_engine.h"
+#include "nigiri/routing/tripbased/query/query_state.h"
 #include "nigiri/special_stations.h"
 
 #include "motis/core/common/timing.h"
@@ -34,8 +34,7 @@ boost::thread_specific_ptr<n::routing::search_state> search_state;
 boost::thread_specific_ptr<n::routing::raptor_state> raptor_state;
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-boost::thread_specific_ptr<n::routing::tripbased::tb_query_state>
-    tb_query_state;
+boost::thread_specific_ptr<n::routing::tripbased::query_state> query_state;
 
 namespace motis::nigiri {
 
@@ -101,7 +100,7 @@ mm::msg_ptr to_routing_response(
     n::pareto_set<n::routing::journey> const* journeys,
     n::interval<n::unixtime_t> search_interval,
     n::routing::search_stats const& search_stats,
-    n::routing::tripbased::tb_query_stats const& tb_query_stats,
+    n::routing::tripbased::query_stats const& query_stats,
     std::uint64_t const routing_time) {
   mm::message_creator fbb;
   MOTIS_START_TIMING(conversion);
@@ -189,18 +188,18 @@ auto run_search(n::routing::search_state& search_state,
 }
 
 auto run_search(n::routing::search_state& search_state,
-                n::routing::tripbased::tb_query_state& tb_query_state,
+                n::routing::tripbased::query_state& query_state,
                 n::timetable const& tt, n::routing::query&& q) {
-  using algo_t = n::routing::tripbased::tb_query_engine;
+  using algo_t = n::routing::tripbased::query_engine;
   return n::routing::search<n::direction::kForward, algo_t>{
-      tt, nullptr, search_state, tb_query_state, std::move(q)}
+      tt, nullptr, search_state, query_state, std::move(q)}
       .execute();
 }
 
-motis::module::msg_ptr route(tag_lookup const& tags, n::timetable const& tt,
-                             n::rt_timetable const* rtt,
-                             motis::module::msg_ptr const& msg,
-                             n::routing::tripbased::transfer_set const* const ts) {
+motis::module::msg_ptr route(
+    tag_lookup const& tags, n::timetable const& tt, n::rt_timetable const* rtt,
+    motis::module::msg_ptr const& msg,
+    n::routing::tripbased::transfer_set const* const ts) {
   using motis::routing::RoutingRequest;
   auto const req = motis_content(RoutingRequest, msg);
 
@@ -353,24 +352,24 @@ motis::module::msg_ptr route(tag_lookup const& tags, n::timetable const& tt,
   if (ts) {
     // tripbased routing
 
-    if (tb_query_state.get() == nullptr) {
-      tb_query_state.reset(new n::routing::tripbased::tb_query_state{tt, *ts});
+    if (query_state.get() == nullptr) {
+      query_state.reset(new n::routing::tripbased::query_state{tt, *ts});
     }
 
     MOTIS_START_TIMING(routing);
     auto search_interval = n::interval<n::unixtime_t>{};
     n::pareto_set<n::routing::journey> const* journeys{nullptr};
     n::routing::search_stats search_stats;
-    n::routing::tripbased::tb_query_stats tb_query_stats;
-    auto const r = run_search(*search_state, *tb_query_state, tt, std::move(q));
+    n::routing::tripbased::query_stats query_stats;
+    auto const r = run_search(*search_state, *query_state, tt, std::move(q));
     journeys = r.journeys_;
     search_stats = r.search_stats_;
-    tb_query_stats = r.algo_stats_;
+    query_stats = r.algo_stats_;
     search_interval = r.interval_;
     MOTIS_STOP_TIMING(routing);
 
     return to_routing_response(tt, rtt, tags, journeys, search_interval,
-                               search_stats, tb_query_stats,
+                               search_stats, query_stats,
                                MOTIS_TIMING_MS(routing));
 
   } else {
