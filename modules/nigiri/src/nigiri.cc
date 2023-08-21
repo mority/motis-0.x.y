@@ -112,7 +112,7 @@ struct nigiri::impl {
   std::unique_ptr<railviz> railviz_;
   std::string initial_permalink_;
   std::vector<schedule_info> schedules_;
-  cista::hash_t hash_;
+  cista::hash_t hash_{0U};
   std::shared_ptr<cista::wrapped<n::routing::tripbased::transfer_set>> ts_;
 };
 
