@@ -97,7 +97,7 @@
 [nigiri]
   url=git@github.com:mority/nigiri.git
   branch=tripbased
-  commit=05aa47de588feafbbe0d6da9594d65772bf5a876
+  commit=b19cde51bd79a3e7b191b8ddba10d60bfbdc4624
 [osmium]
   url=git@github.com:motis-project/libosmium.git
   branch=master
