@@ -118,9 +118,19 @@ mm::msg_ptr to_routing_response(
       CreateStatisticsEntry(fbb, fbb.CreateString("fastest_direct"),
                             search_stats.fastest_direct_),
       CreateStatisticsEntry(fbb, fbb.CreateString("conversion"),
-                            MOTIS_TIMING_MS(conversion))};
+                            MOTIS_TIMING_MS(conversion)),
+      CreateStatisticsEntry(fbb, fbb.CreateString("n_segments_enqueued"),
+                            query_stats.n_segments_enqueued_),
+      CreateStatisticsEntry(fbb, fbb.CreateString("n_segments_pruned"),
+                            query_stats.n_segments_pruned_),
+      CreateStatisticsEntry(fbb, fbb.CreateString("n_journeys_found"),
+                            query_stats.n_journeys_found_),
+      CreateStatisticsEntry(fbb, fbb.CreateString("empty_n"),
+                            query_stats.empty_n_),
+      CreateStatisticsEntry(fbb, fbb.CreateString("max_transfers_reached"),
+                            query_stats.max_transfers_reached_)};
   auto statistics = std::vector<fbs::Offset<Statistics>>{
-      CreateStatistics(fbb, fbb.CreateString("nigiri.raptor"),
+      CreateStatistics(fbb, fbb.CreateString("nigiri.tripbased"),
                        fbb.CreateVectorOfSortedTables(&entries))};
   fbb.create_and_finish(
       MsgContent_RoutingResponse,
