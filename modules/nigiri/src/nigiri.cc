@@ -38,6 +38,7 @@
 #include "motis/nigiri/station_lookup.h"
 #include "motis/nigiri/trip_to_connection.h"
 #include "motis/nigiri/unixtime_conv.h"
+#include "motis/nigiri/eval/commands.h"
 #include "utl/parser/split.h"
 
 namespace fbs = flatbuffers;
@@ -153,6 +154,10 @@ nigiri::nigiri() : module("Next Generation Routing", "nigiri") {
 }
 
 nigiri::~nigiri() = default;
+
+void nigiri::reg_subc(motis::module::subc_reg& r) {
+  r.register_cmd("nigiri_generate", "generate routing queries using the nigiri timetable", eval::generate);
+}
 
 void nigiri::init(motis::module::registry& reg) {
   if (!gtfsrt_paths_.empty()) {

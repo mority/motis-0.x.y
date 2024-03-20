@@ -18,6 +18,7 @@ struct nigiri : public motis::module::module {
   nigiri(nigiri&&) = delete;
   nigiri& operator=(nigiri&&) = delete;
 
+  void reg_subc(motis::module::subc_reg&) override;
   void init(motis::module::registry&) override;
   void import(motis::module::import_dispatcher&) override;
   bool import_successful() const override { return import_successful_; }
