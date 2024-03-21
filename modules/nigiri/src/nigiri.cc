@@ -39,6 +39,7 @@
 #include "motis/nigiri/trip_to_connection.h"
 #include "motis/nigiri/unixtime_conv.h"
 #include "motis/nigiri/eval/commands.h"
+#include "motis/nigiri/query_generator.h"
 #include "utl/parser/split.h"
 
 namespace fbs = flatbuffers;
@@ -205,6 +206,12 @@ void nigiri::init(motis::module::registry& reg) {
                   [&](mm::msg_ptr const& msg) {
                     return route(impl_->tags_, **impl_->tt_,
                                  impl_->get_rtt().get(), msg);
+                  },
+                  {});
+
+  reg.register_op("/nigiri_query_generator",
+                  [&](mm::msg_ptr const& msg) {
+                    return generate(impl_->tags_, **impl_->tt_, msg);
                   },
                   {});
 

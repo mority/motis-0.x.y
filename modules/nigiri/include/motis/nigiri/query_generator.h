@@ -9,11 +9,11 @@ struct timetable;
 struct rt_timetable;
 }  // namespace nigiri
 
-struct tag_lookup;
-
 namespace motis::nigiri {
 
+struct tag_lookup;
+
 motis::module::msg_ptr generate(tag_lookup const&, ::nigiri::timetable const&,
-                                motis::module::msg_ptr const&) {}
+                                motis::module::msg_ptr const&);
 
 }  // namespace motis::nigiri
