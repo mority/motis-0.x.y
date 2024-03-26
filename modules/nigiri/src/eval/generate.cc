@@ -1,12 +1,13 @@
 #include "motis/nigiri/eval/commands.h"
 
-
 #include "conf/configuration.h"
 #include "conf/options_parser.h"
 
 #include "motis/module/message.h"
 #include "motis/bootstrap/dataset_settings.h"
 #include "motis/bootstrap/motis_instance.h"
+
+#include "nigiri/timetable.h"
 
 #include "version.h"
 
@@ -66,8 +67,8 @@ int generate(int argc, char const** argv) {
     parser.read_command_line_args(argc, argv, false);
 
     if (parser.help()) {
-      std::cout << "\n\tnigiri-query-generator (MOTIS v" << motis::short_version()
-                << ")\n\n";
+      std::cout << "\n\tnigiri-query-generator (MOTIS v"
+                << motis::short_version() << ")\n\n";
       parser.print_help(std::cout);
       return 0;
     } else if (parser.version()) {
@@ -89,13 +90,11 @@ int generate(int argc, char const** argv) {
   instance.import(motis::bootstrap::module_settings{}, dataset_opt, import_opt);
 
   // pass commandline arguments to nigiri
-  // construct a query generation message and send it to nigiri
-  motis::module::message_creator fbb;
-
-  instance.call("/nigiri_query_generator")
+  auto const& nigiri_module = instance.get_module<module::module>("nigiri");
+  auto const tt = nigiri_module.get_shared_data<::nigiri::timetable>(
+      to_res_id(module::global_res_id::NIGIRI_TIMETABLE));
 
   return 0;
 }
 
-} // namespace motis::nigiri::eval
-
+}  // namespace motis::nigiri::eval
