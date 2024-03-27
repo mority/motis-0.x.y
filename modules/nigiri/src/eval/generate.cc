@@ -196,10 +196,11 @@ int generate(int argc, char const** argv) {
 
   // instantiate nigiri query generator
   ::nigiri::query_generation::query_generator qg{tt};
+  qg.interval_size_ = ::nigiri::duration_t{generator_opt.interval_size_};
 
-  for (std::uint32_t i = 1U; i <= generator_opt.query_count_; ++i) {
-    if ((i % 100) == 0) {
-      std::cout << i << "/" << generator_opt.query_count_ << "\n";
+  for (std::uint32_t q_id = 1U; q_id <= generator_opt.query_count_; ++q_id) {
+    if ((q_id % 100) == 0) {
+      std::cout << q_id << "/" << generator_opt.query_count_ << "\n";
     }
 
     // unit of time designations of nigiri query time is [unixtime in minutes]
