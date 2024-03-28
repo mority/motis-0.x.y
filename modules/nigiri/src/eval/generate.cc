@@ -3,6 +3,7 @@
 #include <regex>
 
 #include "utl/parser/cstr.h"
+#include "utl/to_vec.h"
 
 #include "conf/configuration.h"
 #include "conf/options_parser.h"
@@ -111,6 +112,24 @@ struct generator_settings : public conf::configuration {
   unsigned interval_size_{60U};  // [minutes]
 };
 
+std::string replace_target_escape(std::string const& str,
+                                  std::string const& target) {
+  auto const esc_pos = str.find(kTargetEscape);
+  utl::verify(esc_pos != std::string::npos, "target escape {} not found in {}",
+              kTargetEscape, str);
+
+  auto clean_target = target;
+  if (clean_target[0] == '/') {
+    clean_target.erase(clean_target.begin());
+  }
+  std::replace(clean_target.begin(), clean_target.end(), '/', '_');
+
+  auto target_str = str;
+  target_str.replace(esc_pos, kTargetEscape.size(), clean_target);
+
+  return target_str;
+}
+
 struct mode {
   CISTA_PRINTABLE(mode);
 
@@ -146,6 +165,320 @@ std::vector<mode> read_modes(std::string const& in) {
     modes.emplace_back(m);
   });
   return modes;
+}
+
+::nigiri::query_generation::transport_mode get_transport_mode(
+    std::vector<mode> const& modes) {
+  constexpr auto const max_walk_speed = 50U;  // [m/minute] --> 3 km/h
+  constexpr auto const max_bike_speed = 200U;  // [m/minute] --> 12 km/h
+  constexpr auto const max_car_speed = 800U;  // [m/minute] --> 48 km/h
+
+  auto r = std::numeric_limits<double>::min();
+  auto mode_id = 0U;
+  ::nigiri::query_generation::transport_mode nigiri_mode{0, 0, 0};
+  for (auto const& m : modes) {
+    std::uint16_t cur_speed;
+    std::uint16_t cur_duration;
+    std::uint16_t cur_range;
+
+    if (m.name_ == "ppr" || m.name_ == "osrm_foot") {
+      cur_speed = max_walk_speed;
+      cur_duration = m.get_param(0, 15);
+      cur_range = cur_duration * max_walk_speed;
+    } else if (m.name_ == "osrm_bike") {
+      cur_speed = max_bike_speed;
+      cur_duration = m.get_param(0, 15);
+      cur_range = cur_duration * max_bike_speed;
+    } else if (m.name_ == "osrm_car" || m.name_ == "osrm_car_parking") {
+      cur_speed = max_car_speed;
+      cur_duration = m.get_param(0, 15);
+      cur_range = cur_duration * max_car_speed;
+    } else if (m.name_ == "gbfs") {
+      std::uint16_t const walk_duration = m.get_param(0, 15);
+      std::uint16_t const bike_duration = m.get_param(1, 15);
+      cur_duration = walk_duration + bike_duration;
+      cur_speed =
+          (max_walk_speed * walk_duration + max_bike_speed * bike_duration) /
+          cur_duration;
+      cur_range = cur_duration * cur_speed;
+    } else {
+      throw utl::fail("unknown mode \"{}\"", m.name_);
+    }
+
+    if (r < cur_range) {
+      r = cur_range;
+      nigiri_mode.mode_id_ = mode_id;
+      nigiri_mode.speed_ = cur_speed;
+      nigiri_mode.max_duration_ = cur_duration;
+    }
+    ++mode_id;
+  }
+  return nigiri_mode;
+}
+
+std::vector<flatbuffers::Offset<intermodal::ModeWrapper>> create_modes(
+    flatbuffers::FlatBufferBuilder& fbb, std::vector<mode> const& modes) {
+  auto v = std::vector<flatbuffers::Offset<intermodal::ModeWrapper>>{};
+  for (auto const& m : modes) {
+    if (m.name_ == "ppr") {
+      v.emplace_back(CreateModeWrapper(
+          fbb, intermodal::Mode_FootPPR,
+          intermodal::CreateFootPPR(
+              fbb, ppr::CreateSearchOptions(fbb, fbb.CreateString("default"),
+                                            60 * m.get_param(0, 15)))
+              .Union()));
+    } else if (m.name_ == "osrm_foot") {
+      v.emplace_back(CreateModeWrapper(
+          fbb, intermodal::Mode_Foot,
+          intermodal::CreateFoot(fbb, 60 * m.get_param(0, 15)).Union()));
+    } else if (m.name_ == "osrm_bike") {
+      v.emplace_back(CreateModeWrapper(
+          fbb, intermodal::Mode_Bike,
+          intermodal::CreateBike(fbb, 60 * m.get_param(0, 15)).Union()));
+    } else if (m.name_ == "osrm_car") {
+      v.emplace_back(CreateModeWrapper(
+          fbb, intermodal::Mode_Car,
+          intermodal::CreateCar(fbb, 60 * m.get_param(0, 15)).Union()));
+    } else if (m.name_ == "osrm_car_parking") {
+      v.emplace_back(CreateModeWrapper(
+          fbb, intermodal::Mode_CarParking,
+          intermodal::CreateCarParking(
+              fbb, 60 * m.get_param(0, 15),
+              ppr::CreateSearchOptions(fbb, fbb.CreateString("default"),
+                                       60 * m.get_param(1, 10)))
+              .Union()));
+    } else if (m.name_ == "gbfs") {
+      v.emplace_back(CreateModeWrapper(
+          fbb, intermodal::Mode_GBFS,
+          intermodal::CreateGBFS(fbb, fbb.CreateString("default"),
+                                 60 * m.get_param(0, 15),
+                                 60 * m.get_param(1, 15))
+              .Union()));
+    } else {
+      throw utl::fail("unknown mode \"{}\"", m.name_);
+    }
+  }
+  return v;
+}
+
+Position to_motis_pos(geo::latlng const& nigiri_pos) {
+  return {nigiri_pos.lat(), nigiri_pos.lng()};
+}
+
+void write_query(::nigiri::query_generation::query_generator& qg,
+                 std::uint32_t query_id, Interval const interval,
+                 std::vector<mode> const& start_modes,
+                 std::vector<mode> const& dest_modes,
+                 MsgContent const message_type,
+                 intermodal::IntermodalStart const start_type,
+                 intermodal::IntermodalDestination const dest_type,
+                 SearchDir dir, std::vector<std::string> const& routers,
+                 std::vector<std::ofstream>& out_files) {
+  auto fbbs = utl::to_vec(routers, [](auto&&) {
+    return std::make_unique<module::message_creator>();
+  });
+
+  auto const get_destination = [&](flatbuffers::FlatBufferBuilder& fbb) {
+    if (dest_type == intermodal::IntermodalDestination_InputPosition) {
+      auto const dest_pos = qg.random_dest_pos();
+      return intermodal::CreateInputPosition(fbb, dest_pos.lat(),
+                                             dest_pos.lng())
+          .Union();
+    } else {
+      return routing::CreateInputStation(fbb,
+                                         fbb.CreateString(qg.random_stop_id()),
+                                         fbb.CreateString(""))
+          .Union();
+    }
+  };
+
+  if (message_type == MsgContent_IntermodalRoutingRequest) {
+    switch (start_type) {
+      case intermodal::IntermodalStart_IntermodalPretripStart: {
+        auto const start_pos = to_motis_pos(qg.random_start_pos());
+
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_IntermodalRoutingRequest,
+              intermodal::CreateIntermodalRoutingRequest(
+                  fbb, start_type,
+                  intermodal::CreateIntermodalPretripStart(
+                      fbb, &start_pos, &interval, qg.min_connection_count_,
+                      qg.extend_interval_earlier_, qg.extend_interval_later_)
+                      .Union(),
+                  fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
+                  get_destination(fbb),
+                  fbb.CreateVector(create_modes(fbb, dest_modes)),
+                  routing::SearchType_Default, dir, fbb.CreateString(router))
+                  .Union(),
+              "/intermodal", DestinationType_Module, query_id);
+        }
+
+        break;
+      }
+
+      case intermodal::IntermodalStart_IntermodalOntripStart: {
+        auto const start_pos = to_motis_pos(qg.random_start_pos());
+
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_IntermodalRoutingRequest,
+              CreateIntermodalRoutingRequest(
+                  fbb, start_type,
+                  intermodal::CreateIntermodalOntripStart(fbb, &start_pos,
+                                                          interval.begin())
+                      .Union(),
+                  fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
+                  get_destination(fbb),
+                  fbb.CreateVector(create_modes(fbb, dest_modes)),
+                  routing::SearchType_Default, dir, fbb.CreateString(router))
+                  .Union(),
+              "/intermodal", DestinationType_Module, query_id);
+        }
+
+        break;
+      }
+
+      case intermodal::IntermodalStart_OntripTrainStart: {
+        // TODO
+        break;
+      }
+
+      case intermodal::IntermodalStart_OntripStationStart: {
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_IntermodalRoutingRequest,
+              intermodal::CreateIntermodalRoutingRequest(
+                  fbb, start_type,
+                  routing::CreateOntripStationStart(
+                      fbb,
+                      routing::CreateInputStation(
+                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb.CreateString("")),
+                      interval.begin())
+                      .Union(),
+                  fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
+                  get_destination(fbb),
+                  fbb.CreateVector(create_modes(fbb, dest_modes)),
+                  routing::SearchType_Default, dir, fbb.CreateString(router))
+                  .Union(),
+              "/intermodal", DestinationType_Module, query_id);
+        }
+
+        break;
+      }
+
+      case intermodal::IntermodalStart_PretripStart: {
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_IntermodalRoutingRequest,
+              CreateIntermodalRoutingRequest(
+                  fbb, start_type,
+                  CreatePretripStart(
+                      fbb,
+                      routing::CreateInputStation(
+                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb.CreateString("")),
+                      &interval, qg.min_connection_count_,
+                      qg.extend_interval_earlier_, qg.extend_interval_later_)
+                      .Union(),
+                  fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
+                  get_destination(fbb),
+                  fbb.CreateVector(create_modes(fbb, dest_modes)),
+                  routing::SearchType_Default, dir, fbb.CreateString(router))
+                  .Union(),
+              "/intermodal", DestinationType_Module, query_id);
+        }
+
+        break;
+      }
+
+      default:
+        throw utl::fail(
+            "start type {} not supported for message type intermodal",
+            EnumNameIntermodalStart(start_type));
+    }
+  } else if (message_type == MsgContent_RoutingRequest) {
+
+    switch (start_type) {
+
+      case intermodal::IntermodalStart_OntripTrainStart: {
+        // TODO
+        break;
+      }
+
+      case intermodal::IntermodalStart_OntripStationStart: {
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_RoutingRequest,
+              CreateRoutingRequest(
+                  fbb, routing::Start_OntripStationStart,
+                  CreateOntripStationStart(
+                      fbb,
+                      routing::CreateInputStation(
+                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb.CreateString("")),
+                      interval.begin())
+                      .Union(),
+                  routing::CreateInputStation(
+                      fbb, fbb.CreateString(qg.random_stop_id()),
+                      fbb.CreateString("")),
+                  routing::SearchType_Default, dir,
+                  fbb.CreateVector(
+                      std::vector<flatbuffers::Offset<routing::Via>>()),
+                  fbb.CreateVector(std::vector<flatbuffers::Offset<
+                                       routing::AdditionalEdgeWrapper>>()))
+                  .Union(),
+              router, DestinationType_Module, query_id);
+        }
+        break;
+      }
+
+      case intermodal::IntermodalStart_PretripStart: {
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_RoutingRequest,
+              CreateRoutingRequest(
+                  fbb, routing::Start_PretripStart,
+                  CreatePretripStart(
+                      fbb,
+                      routing::CreateInputStation(
+                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb.CreateString("")),
+                      &interval, qg.min_connection_count_,
+                      qg.extend_interval_earlier_, qg.extend_interval_later_)
+                      .Union(),
+                  routing::CreateInputStation(
+                      fbb, fbb.CreateString(qg.random_stop_id()),
+                      fbb.CreateString("")),
+                  routing::SearchType_Default, dir,
+                  fbb.CreateVector(
+                      std::vector<flatbuffers::Offset<routing::Via>>()),
+                  fbb.CreateVector(std::vector<flatbuffers::Offset<
+                                       routing::AdditionalEdgeWrapper>>()))
+                  .Union(),
+              router, DestinationType_Module, query_id);
+        }
+        break;
+      }
+
+      default:
+        throw utl::fail("start type {} not supported for message type routing",
+                        EnumNameIntermodalStart(start_type));
+    }
+  }
+
+  for (auto const& [out_file, fbbp] : utl::zip(out_files, fbbs)) {
+    auto& fbb = *fbbp;
+    out_file << make_msg(fbb)->to_json(module::json_format::SINGLE_LINE)
+             << "\n";
+  }
 }
 
 int generate(int argc, char const** argv) {
@@ -186,6 +519,27 @@ int generate(int argc, char const** argv) {
   auto const dest_type = generator_opt.get_dest_type();
   auto const message_type = generator_opt.get_message_type();
 
+  utl::verify(generator_opt.dest_type_ == "coordinate" ||
+                  generator_opt.dest_type_ == "station",
+              "unknown destination type {}, supported: coordinate, station",
+              generator_opt.dest_type_);
+  utl::verify(
+      !start_modes.empty() ||
+          (start_type != intermodal::IntermodalStart_IntermodalOntripStart &&
+           start_type != intermodal::IntermodalStart_IntermodalPretripStart),
+      "no start modes given: {} (start_type={})", generator_opt.start_modes_,
+      EnumNameIntermodalStart(start_type));
+  utl::verify(!dest_modes.empty() ||
+                  dest_type != intermodal::IntermodalDestination_InputPosition,
+              "no destination modes given: {}, dest_type={}",
+              generator_opt.dest_modes_,
+              EnumNameIntermodalDestination(dest_type));
+
+  auto of_streams =
+      utl::to_vec(generator_opt.routers_, [&](std::string const& router) {
+        return std::ofstream{replace_target_escape(generator_opt.out_, router)};
+      });
+
   // need a motis instance to load nigiri module and timetable
   motis::bootstrap::motis_instance instance;
   instance.import(module_opt, dataset_opt, import_opt);
@@ -194,20 +548,40 @@ int generate(int argc, char const** argv) {
   ::nigiri::timetable const& tt = *instance.get<::nigiri::timetable*>(
       to_res_id(motis::module::global_res_id::NIGIRI_TIMETABLE));
 
-  // instantiate nigiri query generator
+  // nigiri query generator setup
   ::nigiri::query_generation::query_generator qg{tt};
   qg.interval_size_ = ::nigiri::duration_t{generator_opt.interval_size_};
+  qg.extend_interval_earlier_ = generator_opt.extend_earlier_;
+  qg.extend_interval_later_ = generator_opt.extend_later_;
+  qg.min_connection_count_ = generator_opt.min_connection_count_;
+  qg.start_match_mode_ =
+      start_type == intermodal::IntermodalStart_IntermodalPretripStart ||
+              start_type == intermodal::IntermodalStart_IntermodalOntripStart
+          ? ::nigiri::routing::location_match_mode::kIntermodal
+          : ::nigiri::routing::location_match_mode::kEquivalent;
+  qg.dest_match_mode_ =
+      dest_type == intermodal::IntermodalDestination_InputPosition
+          ? ::nigiri::routing::location_match_mode::kIntermodal
+          : ::nigiri::routing::location_match_mode::kEquivalent;
+  qg.start_mode_ = get_transport_mode(start_modes);
+  qg.dest_mode_ = get_transport_mode(dest_modes);
 
-  for (std::uint32_t q_id = 1U; q_id <= generator_opt.query_count_; ++q_id) {
-    if ((q_id % 100) == 0) {
-      std::cout << q_id << "/" << generator_opt.query_count_ << "\n";
+  for (std::uint32_t query_id = 1U; query_id <= generator_opt.query_count_;
+       ++query_id) {
+    if ((query_id % 100) == 0) {
+      std::cout << query_id << "/" << generator_opt.query_count_ << "\n";
     }
 
     // unit of time designations of nigiri query time is [unixtime in minutes]
     unixtime const random_time =
         qg.random_time().time_since_epoch().count() * 60;  // [unixtime in s]
-    Interval random_interval{random_time,
-                             random_time + generator_opt.interval_size_ * 60};
+    Interval const random_interval{
+        random_time, random_time + generator_opt.interval_size_ * 60};
+
+    write_query(qg, query_id, random_interval, start_modes, dest_modes,
+                message_type, start_type, dest_type,
+                generator_opt.get_search_dir(), generator_opt.routers_,
+                of_streams);
   }
 
   return 0;
