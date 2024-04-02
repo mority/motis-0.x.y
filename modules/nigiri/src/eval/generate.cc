@@ -12,6 +12,9 @@
 #include "motis/module/message.h"
 #include "motis/bootstrap/dataset_settings.h"
 #include "motis/bootstrap/motis_instance.h"
+#include "motis/nigiri/bounds.h"
+#include "motis/nigiri/eval/parse_bbox.h"
+#include "motis/nigiri/eval/parse_poly.h"
 #include "motis/nigiri/extern_trip.h"
 #include "motis/nigiri/tag_lookup.h"
 #include "motis/nigiri/unixtime_conv.h"
@@ -29,8 +32,8 @@ struct generator_settings : public conf::configuration {
   generator_settings() : configuration("Generator Options", "") {
     param(query_count_, "query_count", "number of queries to generate");
     param(out_, "out", "file to write generated queries to");
-    // param(bbox_, "bbox", "bounding box for locations");
-    // param(poly_file_, "poly", "bounding polygon for locations");
+    param(bbox_, "bbox", "bounding box for locations");
+    param(poly_file_, "poly", "bounding polygon for locations");
     param(start_modes_, "start_modes", "start modes ppr-15|osrm_car-15|...");
     param(dest_modes_, "dest_modes", "destination modes (see start modes)");
     param(large_stations_, "large_stations", "use only large stations");
@@ -178,7 +181,7 @@ std::vector<mode> read_modes(std::string const& in) {
   constexpr auto const max_car_speed = 800U;  // [m/minute] --> 48 km/h
 
   auto r = std::numeric_limits<double>::min();
-  auto mode_id = 0U;
+  auto mode_id = 0;
   ::nigiri::query_generation::transport_mode nigiri_mode{0, 0, 0};
   for (auto const& m : modes) {
     std::uint16_t cur_speed;
@@ -267,6 +270,16 @@ std::vector<flatbuffers::Offset<intermodal::ModeWrapper>> create_modes(
 
 Position to_motis_pos(geo::latlng const& nigiri_pos) {
   return {nigiri_pos.lat(), nigiri_pos.lng()};
+}
+
+std::unique_ptr<bounds> parse_bounds(generator_settings const& opt) {
+  if (!opt.bbox_.empty()) {
+    return parse_bbox(opt.bbox_);
+  } else if (!opt.poly_file_.empty()) {
+    return parse_poly(opt.poly_file_);
+  } else {
+    return nullptr;
+  }
 }
 
 void write_query(::nigiri::query_generation::query_generator& qg,
