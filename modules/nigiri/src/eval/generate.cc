@@ -2,6 +2,7 @@
 
 #include <regex>
 
+#include "utl/erase_if.h"
 #include "utl/parser/cstr.h"
 #include "utl/to_vec.h"
 
@@ -482,16 +483,26 @@ void write_query(::nigiri::query_generation::query_generator& qg,
 }
 
 int generate(int argc, char const** argv) {
-  generator_settings generator_opt;
-
-  motis::bootstrap::module_settings module_opt;
+  // need a motis instance to load nigiri module and timetable
+  motis::bootstrap::motis_instance instance;
   motis::bootstrap::dataset_settings dataset_opt;
   motis::bootstrap::import_settings import_opt;
+  motis::bootstrap::module_settings module_opt({"Next Generation Routing"});
+
+  generator_settings generator_opt;
+
+  std::vector<conf::configuration*> confs = {&import_opt, &dataset_opt,
+                                             &module_opt, &generator_opt};
+  for (auto const& module : instance.modules()) {
+    if (module->name() == "Next Generation Routing") {
+      confs.push_back(module);
+    }
+  }
 
   // parse commandline arguments
   try {
-    conf::options_parser parser(
-        {&generator_opt, &module_opt, &dataset_opt, &import_opt});
+    conf::options_parser parser(confs);
+    parser.read_environment("MOTIS_");
     parser.read_command_line_args(argc, argv, false);
 
     if (parser.help()) {
@@ -512,6 +523,9 @@ int generate(int argc, char const** argv) {
     std::cout << "options error: " << e.what() << "\n";
     return 1;
   }
+
+  instance.import(module_opt, dataset_opt, import_opt);
+  // instance.init_modules(module_opt);
 
   auto const start_modes = read_modes(generator_opt.start_modes_);
   auto const dest_modes = read_modes(generator_opt.dest_modes_);
@@ -540,10 +554,6 @@ int generate(int argc, char const** argv) {
         return std::ofstream{replace_target_escape(generator_opt.out_, router)};
       });
 
-  // need a motis instance to load nigiri module and timetable
-  motis::bootstrap::motis_instance instance;
-  instance.import(module_opt, dataset_opt, import_opt);
-
   // get the nigiri timetable from shared data
   ::nigiri::timetable const& tt = *instance.get<::nigiri::timetable*>(
       to_res_id(motis::module::global_res_id::NIGIRI_TIMETABLE));
@@ -565,6 +575,9 @@ int generate(int argc, char const** argv) {
           : ::nigiri::routing::location_match_mode::kEquivalent;
   qg.start_mode_ = get_transport_mode(start_modes);
   qg.dest_mode_ = get_transport_mode(dest_modes);
+
+  std::cout << "timetable spans " << tt.external_interval().from_ << " to "
+            << tt.external_interval().to_ << "\n";
 
   for (std::uint32_t query_id = 1U; query_id <= generator_opt.query_count_;
        ++query_id) {
