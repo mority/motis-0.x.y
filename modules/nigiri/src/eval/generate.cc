@@ -12,6 +12,9 @@
 #include "motis/module/message.h"
 #include "motis/bootstrap/dataset_settings.h"
 #include "motis/bootstrap/motis_instance.h"
+#include "motis/nigiri/extern_trip.h"
+#include "motis/nigiri/tag_lookup.h"
+#include "motis/nigiri/unixtime_conv.h"
 
 #include "nigiri/query_generator/query_generator.h"
 #include "nigiri/timetable.h"
@@ -267,8 +270,8 @@ Position to_motis_pos(geo::latlng const& nigiri_pos) {
 }
 
 void write_query(::nigiri::query_generation::query_generator& qg,
-                 std::uint32_t query_id, Interval const interval,
-                 std::vector<mode> const& start_modes,
+                 nigiri::tag_lookup const& tags, std::uint32_t query_id,
+                 Interval const interval, std::vector<mode> const& start_modes,
                  std::vector<mode> const& dest_modes,
                  MsgContent const message_type,
                  intermodal::IntermodalStart const start_type,
@@ -343,7 +346,38 @@ void write_query(::nigiri::query_generation::query_generator& qg,
       }
 
       case intermodal::IntermodalStart_OntripTrainStart: {
-        // TODO
+        auto const nigiri_on_trip = qg.random_on_trip();
+        auto const extern_trip = nigiri_trip_to_extern_trip(
+            tags, qg.tt_, nigiri_on_trip.trip_idx_, nigiri_on_trip.transport_);
+
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_IntermodalRoutingRequest,
+              CreateIntermodalRoutingRequest(
+                  fbb, start_type,
+                  CreateOntripTrainStart(
+                      fbb,
+                      CreateTripId(
+                          fbb, fbb.CreateString(extern_trip.id_),
+                          fbb.CreateString(extern_trip.station_id_),
+                          extern_trip.train_nr_, extern_trip.time_,
+                          fbb.CreateString(extern_trip.target_station_id_),
+                          extern_trip.target_time_,
+                          fbb.CreateString(extern_trip.line_id_)),
+                      routing::CreateInputStation(
+                          fbb, fbb.CreateString(nigiri_on_trip.trip_stop_id_),
+                          fbb.CreateString("")),
+                      to_motis_unixtime(nigiri_on_trip.unixtime_arr_stop_))
+                      .Union(),
+                  fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
+                  get_destination(fbb),
+                  fbb.CreateVector(create_modes(fbb, dest_modes)),
+                  routing::SearchType_Default, dir, fbb.CreateString(router))
+                  .Union(),
+              "/intermodal", DestinationType_Module, query_id);
+        }
+
         break;
       }
 
@@ -408,7 +442,42 @@ void write_query(::nigiri::query_generation::query_generator& qg,
     switch (start_type) {
 
       case intermodal::IntermodalStart_OntripTrainStart: {
-        // TODO
+        auto const nigiri_on_trip = qg.random_on_trip();
+        auto const extern_trip = nigiri_trip_to_extern_trip(
+            tags, qg.tt_, nigiri_on_trip.trip_idx_, nigiri_on_trip.transport_);
+
+        for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
+          auto& fbb = *fbbp;
+          fbb.create_and_finish(
+              MsgContent_RoutingRequest,
+              motis::routing::CreateRoutingRequest(
+                  fbb, routing::Start_OntripTrainStart,
+                  routing::CreateOntripTrainStart(
+                      fbb,
+                      CreateTripId(
+                          fbb, fbb.CreateString(extern_trip.id_),
+                          fbb.CreateString(extern_trip.station_id_),
+                          extern_trip.train_nr_, extern_trip.time_,
+                          fbb.CreateString(extern_trip.target_station_id_),
+                          extern_trip.target_time_,
+                          fbb.CreateString(extern_trip.line_id_)),
+                      routing::CreateInputStation(
+                          fbb, fbb.CreateString(nigiri_on_trip.trip_stop_id_),
+                          fbb.CreateString("")),
+                      to_motis_unixtime(nigiri_on_trip.unixtime_arr_stop_))
+                      .Union(),
+                  routing::CreateInputStation(
+                      fbb, fbb.CreateString(qg.random_stop_id()),
+                      fbb.CreateString("")),
+                  routing::SearchType_Default, dir,
+                  fbb.CreateVector(
+                      std::vector<flatbuffers::Offset<routing::Via>>()),
+                  fbb.CreateVector(std::vector<flatbuffers::Offset<
+                                       routing::AdditionalEdgeWrapper>>()))
+                  .Union(),
+              router, DestinationType_Module, query_id);
+        }
+
         break;
       }
 
@@ -525,7 +594,6 @@ int generate(int argc, char const** argv) {
   }
 
   instance.import(module_opt, dataset_opt, import_opt);
-  // instance.init_modules(module_opt);
 
   auto const start_modes = read_modes(generator_opt.start_modes_);
   auto const dest_modes = read_modes(generator_opt.dest_modes_);
@@ -579,6 +647,10 @@ int generate(int argc, char const** argv) {
   std::cout << "timetable spans " << tt.external_interval().from_ << " to "
             << tt.external_interval().to_ << "\n";
 
+  // get nigiri tags from shared data
+  nigiri::tag_lookup const& tags = *instance.get<nigiri::tag_lookup*>(
+      to_res_id(motis::module::global_res_id::NIGIRI_TAGS));
+
   for (std::uint32_t query_id = 1U; query_id <= generator_opt.query_count_;
        ++query_id) {
     if ((query_id % 100) == 0) {
@@ -587,11 +659,11 @@ int generate(int argc, char const** argv) {
 
     // unit of time designations of nigiri query time is [unixtime in minutes]
     unixtime const random_time =
-        qg.random_time().time_since_epoch().count() * 60;  // [unixtime in s]
+        to_motis_unixtime(qg.random_time());  // [unixtime in s]
     Interval const random_interval{
         random_time, random_time + generator_opt.interval_size_ * 60};
 
-    write_query(qg, query_id, random_interval, start_modes, dest_modes,
+    write_query(qg, tags, query_id, random_interval, start_modes, dest_modes,
                 message_type, start_type, dest_type,
                 generator_opt.get_search_dir(), generator_opt.routers_,
                 of_streams);
