@@ -12,10 +12,8 @@
 #include "motis/module/message.h"
 #include "motis/bootstrap/dataset_settings.h"
 #include "motis/bootstrap/motis_instance.h"
-#include "motis/nigiri/bounds.h"
-#include "motis/nigiri/eval/parse_bbox.h"
-#include "motis/nigiri/eval/parse_poly.h"
 #include "motis/nigiri/extern_trip.h"
+#include "motis/nigiri/location.h"
 #include "motis/nigiri/tag_lookup.h"
 #include "motis/nigiri/unixtime_conv.h"
 
@@ -32,11 +30,8 @@ struct generator_settings : public conf::configuration {
   generator_settings() : configuration("Generator Options", "") {
     param(query_count_, "query_count", "number of queries to generate");
     param(out_, "out", "file to write generated queries to");
-    param(bbox_, "bbox", "bounding box for locations");
-    param(poly_file_, "poly", "bounding polygon for locations");
     param(start_modes_, "start_modes", "start modes ppr-15|osrm_car-15|...");
     param(dest_modes_, "dest_modes", "destination modes (see start modes)");
-    param(large_stations_, "large_stations", "use only large stations");
     param(message_type_, "message_type", "intermodal|routing");
     param(start_type_, "start_type",
           "query type:\n"
@@ -104,14 +99,11 @@ struct generator_settings : public conf::configuration {
   int query_count_{1000};
   std::string message_type_{"intermodal"};
   std::string out_{"q_TARGET.txt"};
-  std::string bbox_;
-  std::string poly_file_;
   std::string start_modes_;
   std::string dest_modes_;
   std::string start_type_{"intermodal_pretrip"};
   std::string dest_type_{"coordinate"};
-  bool large_stations_{false};
-  std::vector<std::string> routers_{"/routing"};
+  std::vector<std::string> routers_{"/nigiri"};
   std::string search_dir_{"forward"};
   bool extend_earlier_{false};
   bool extend_later_{false};
@@ -272,19 +264,9 @@ Position to_motis_pos(geo::latlng const& nigiri_pos) {
   return {nigiri_pos.lat(), nigiri_pos.lng()};
 }
 
-std::unique_ptr<bounds> parse_bounds(generator_settings const& opt) {
-  if (!opt.bbox_.empty()) {
-    return parse_bbox(opt.bbox_);
-  } else if (!opt.poly_file_.empty()) {
-    return parse_poly(opt.poly_file_);
-  } else {
-    return nullptr;
-  }
-}
-
 void write_query(::nigiri::query_generation::query_generator& qg,
                  nigiri::tag_lookup const& tags, std::uint32_t query_id,
-                 Interval const interval, std::vector<mode> const& start_modes,
+                 std::vector<mode> const& start_modes,
                  std::vector<mode> const& dest_modes,
                  MsgContent const message_type,
                  intermodal::IntermodalStart const start_type,
@@ -295,16 +277,39 @@ void write_query(::nigiri::query_generation::query_generator& qg,
     return std::make_unique<module::message_creator>();
   });
 
+  // unit of time designations of nigiri query time is [unixtime in minutes]
+  auto const start_time = qg.random_time();
+
+  ::nigiri::interval<::nigiri::unixtime_t> const nigiri_start_interval{
+      start_time, start_time + qg.interval_size_};
+
+  ::nigiri::interval<::nigiri::unixtime_t> const nigiri_dest_interval{
+      start_time, start_time + ::nigiri::duration_t{1440U}};  // +24h
+
+  Interval const start_interval{to_motis_unixtime(nigiri_start_interval.from_),
+                                to_motis_unixtime(nigiri_start_interval.to_)};
+
+  // start
+  auto const start_location_idx = qg.random_active_location(
+      nigiri_start_interval, ::nigiri::event_type::kDep);
+  auto const start_location_id =
+      get_station_id(tags, qg.tt_, start_location_idx);
+  auto const start_pos = to_motis_pos(qg.pos_near_start(start_location_idx));
+
+  // destination
+  auto const dest_location_idx = qg.random_active_location(
+      nigiri_dest_interval, ::nigiri::event_type::kArr);
+  auto const dest_location_id = get_station_id(tags, qg.tt_, dest_location_idx);
+  auto const dest_pos = to_motis_pos(qg.pos_near_dest(dest_location_idx));
+
   auto const get_destination = [&](flatbuffers::FlatBufferBuilder& fbb) {
     if (dest_type == intermodal::IntermodalDestination_InputPosition) {
-      auto const dest_pos = qg.random_dest_pos();
       return intermodal::CreateInputPosition(fbb, dest_pos.lat(),
                                              dest_pos.lng())
           .Union();
     } else {
-      return routing::CreateInputStation(fbb,
-                                         fbb.CreateString(qg.random_stop_id()),
-                                         fbb.CreateString(""))
+      return routing::CreateInputStation(
+                 fbb, fbb.CreateString(dest_location_id), fbb.CreateString(""))
           .Union();
     }
   };
@@ -312,8 +317,6 @@ void write_query(::nigiri::query_generation::query_generator& qg,
   if (message_type == MsgContent_IntermodalRoutingRequest) {
     switch (start_type) {
       case intermodal::IntermodalStart_IntermodalPretripStart: {
-        auto const start_pos = to_motis_pos(qg.random_start_pos());
-
         for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
           auto& fbb = *fbbp;
           fbb.create_and_finish(
@@ -321,8 +324,9 @@ void write_query(::nigiri::query_generation::query_generator& qg,
               intermodal::CreateIntermodalRoutingRequest(
                   fbb, start_type,
                   intermodal::CreateIntermodalPretripStart(
-                      fbb, &start_pos, &interval, qg.min_connection_count_,
-                      qg.extend_interval_earlier_, qg.extend_interval_later_)
+                      fbb, &start_pos, &start_interval,
+                      qg.min_connection_count_, qg.extend_interval_earlier_,
+                      qg.extend_interval_later_)
                       .Union(),
                   fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
                   get_destination(fbb),
@@ -336,16 +340,14 @@ void write_query(::nigiri::query_generation::query_generator& qg,
       }
 
       case intermodal::IntermodalStart_IntermodalOntripStart: {
-        auto const start_pos = to_motis_pos(qg.random_start_pos());
-
         for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
           auto& fbb = *fbbp;
           fbb.create_and_finish(
               MsgContent_IntermodalRoutingRequest,
               CreateIntermodalRoutingRequest(
                   fbb, start_type,
-                  intermodal::CreateIntermodalOntripStart(fbb, &start_pos,
-                                                          interval.begin())
+                  intermodal::CreateIntermodalOntripStart(
+                      fbb, &start_pos, start_interval.begin())
                       .Union(),
                   fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
                   get_destination(fbb),
@@ -362,6 +364,8 @@ void write_query(::nigiri::query_generation::query_generator& qg,
         auto const nigiri_on_trip = qg.random_on_trip();
         auto const extern_trip = nigiri_trip_to_extern_trip(
             tags, qg.tt_, nigiri_on_trip.trip_idx_, nigiri_on_trip.transport_);
+        auto const trip_stop_id =
+            get_station_id(tags, qg.tt_, nigiri_on_trip.trip_stop_);
 
         for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
           auto& fbb = *fbbp;
@@ -379,7 +383,7 @@ void write_query(::nigiri::query_generation::query_generator& qg,
                           extern_trip.target_time_,
                           fbb.CreateString(extern_trip.line_id_)),
                       routing::CreateInputStation(
-                          fbb, fbb.CreateString(nigiri_on_trip.trip_stop_id_),
+                          fbb, fbb.CreateString(trip_stop_id),
                           fbb.CreateString("")),
                       to_motis_unixtime(nigiri_on_trip.unixtime_arr_stop_))
                       .Union(),
@@ -404,9 +408,9 @@ void write_query(::nigiri::query_generation::query_generator& qg,
                   routing::CreateOntripStationStart(
                       fbb,
                       routing::CreateInputStation(
-                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb, fbb.CreateString(start_location_id),
                           fbb.CreateString("")),
-                      interval.begin())
+                      start_interval.begin())
                       .Union(),
                   fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
                   get_destination(fbb),
@@ -429,9 +433,9 @@ void write_query(::nigiri::query_generation::query_generator& qg,
                   CreatePretripStart(
                       fbb,
                       routing::CreateInputStation(
-                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb, fbb.CreateString(start_location_id),
                           fbb.CreateString("")),
-                      &interval, qg.min_connection_count_,
+                      &start_interval, qg.min_connection_count_,
                       qg.extend_interval_earlier_, qg.extend_interval_later_)
                       .Union(),
                   fbb.CreateVector(create_modes(fbb, start_modes)), dest_type,
@@ -458,6 +462,8 @@ void write_query(::nigiri::query_generation::query_generator& qg,
         auto const nigiri_on_trip = qg.random_on_trip();
         auto const extern_trip = nigiri_trip_to_extern_trip(
             tags, qg.tt_, nigiri_on_trip.trip_idx_, nigiri_on_trip.transport_);
+        auto const trip_stop_id =
+            get_station_id(tags, qg.tt_, nigiri_on_trip.trip_stop_);
 
         for (auto const& [fbbp, router] : utl::zip(fbbs, routers)) {
           auto& fbb = *fbbp;
@@ -475,12 +481,12 @@ void write_query(::nigiri::query_generation::query_generator& qg,
                           extern_trip.target_time_,
                           fbb.CreateString(extern_trip.line_id_)),
                       routing::CreateInputStation(
-                          fbb, fbb.CreateString(nigiri_on_trip.trip_stop_id_),
+                          fbb, fbb.CreateString(trip_stop_id),
                           fbb.CreateString("")),
                       to_motis_unixtime(nigiri_on_trip.unixtime_arr_stop_))
                       .Union(),
                   routing::CreateInputStation(
-                      fbb, fbb.CreateString(qg.random_stop_id()),
+                      fbb, fbb.CreateString(dest_location_id),
                       fbb.CreateString("")),
                   routing::SearchType_Default, dir,
                   fbb.CreateVector(
@@ -504,12 +510,12 @@ void write_query(::nigiri::query_generation::query_generator& qg,
                   CreateOntripStationStart(
                       fbb,
                       routing::CreateInputStation(
-                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb, fbb.CreateString(start_location_id),
                           fbb.CreateString("")),
-                      interval.begin())
+                      start_interval.begin())
                       .Union(),
                   routing::CreateInputStation(
-                      fbb, fbb.CreateString(qg.random_stop_id()),
+                      fbb, fbb.CreateString(dest_location_id),
                       fbb.CreateString("")),
                   routing::SearchType_Default, dir,
                   fbb.CreateVector(
@@ -532,13 +538,13 @@ void write_query(::nigiri::query_generation::query_generator& qg,
                   CreatePretripStart(
                       fbb,
                       routing::CreateInputStation(
-                          fbb, fbb.CreateString(qg.random_stop_id()),
+                          fbb, fbb.CreateString(start_location_id),
                           fbb.CreateString("")),
-                      &interval, qg.min_connection_count_,
+                      &start_interval, qg.min_connection_count_,
                       qg.extend_interval_earlier_, qg.extend_interval_later_)
                       .Union(),
                   routing::CreateInputStation(
-                      fbb, fbb.CreateString(qg.random_stop_id()),
+                      fbb, fbb.CreateString(dest_location_id),
                       fbb.CreateString("")),
                   routing::SearchType_Default, dir,
                   fbb.CreateVector(
@@ -656,9 +662,7 @@ int generate(int argc, char const** argv) {
           : ::nigiri::routing::location_match_mode::kEquivalent;
   qg.start_mode_ = get_transport_mode(start_modes);
   qg.dest_mode_ = get_transport_mode(dest_modes);
-
-  std::cout << "timetable spans " << tt.external_interval().from_ << " to "
-            << tt.external_interval().to_ << "\n";
+  qg.init_rng();
 
   // get nigiri tags from shared data
   nigiri::tag_lookup const& tags = *instance.get<nigiri::tag_lookup*>(
@@ -669,17 +673,9 @@ int generate(int argc, char const** argv) {
     if ((query_id % 100) == 0) {
       std::cout << query_id << "/" << generator_opt.query_count_ << "\n";
     }
-
-    // unit of time designations of nigiri query time is [unixtime in minutes]
-    unixtime const random_time =
-        to_motis_unixtime(qg.random_time());  // [unixtime in s]
-    Interval const random_interval{
-        random_time, random_time + generator_opt.interval_size_ * 60};
-
-    write_query(qg, tags, query_id, random_interval, start_modes, dest_modes,
-                message_type, start_type, dest_type,
-                generator_opt.get_search_dir(), generator_opt.routers_,
-                of_streams);
+    write_query(qg, tags, query_id, start_modes, dest_modes, message_type,
+                start_type, dest_type, generator_opt.get_search_dir(),
+                generator_opt.routers_, of_streams);
   }
 
   return 0;
