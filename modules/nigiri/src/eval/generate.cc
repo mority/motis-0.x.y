@@ -265,7 +265,7 @@ Position to_motis_pos(geo::latlng const& nigiri_pos) {
 }
 
 void write_query(::nigiri::query_generation::generator& qg,
-                 nigiri::tag_lookup const& tags, std::uint32_t query_id,
+                 nigiri::tag_lookup const& tags, std::int32_t query_id,
                  std::vector<mode> const& start_modes,
                  std::vector<mode> const& dest_modes,
                  MsgContent const message_type,
@@ -703,7 +703,7 @@ int generate(int argc, char const** argv) {
   nigiri::tag_lookup const& tags = *instance.get<nigiri::tag_lookup*>(
       to_res_id(motis::module::global_res_id::NIGIRI_TAGS));
 
-  for (std::uint32_t query_id = 1U; query_id <= generator_opt.query_count_;
+  for (std::int32_t query_id = 1; query_id <= generator_opt.query_count_;
        ++query_id) {
     if ((query_id % 100) == 0) {
       std::cout << query_id << "/" << generator_opt.query_count_ << "\n";
