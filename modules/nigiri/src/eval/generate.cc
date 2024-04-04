@@ -108,7 +108,7 @@ struct generator_settings : public conf::configuration {
   bool extend_earlier_{false};
   bool extend_later_{false};
   unsigned min_connection_count_{0U};
-  unsigned interval_size_{60U};  // [minutes]
+  unsigned interval_size_{120U};  // [minutes]
 };
 
 std::string replace_target_escape(std::string const& str,
@@ -277,6 +277,8 @@ void write_query(::nigiri::query_generation::generator& qg,
     return std::make_unique<module::message_creator>();
   });
 
+begin_randomize:
+
   // unit of time designations of nigiri query time is [unixtime in minutes]
   auto const start_time = qg.random_time();
 
@@ -289,25 +291,23 @@ void write_query(::nigiri::query_generation::generator& qg,
   Interval const start_interval{to_motis_unixtime(nigiri_start_interval.from_),
                                 to_motis_unixtime(nigiri_start_interval.to_)};
 
-  // start
+  // randomize start and destination location indices
   auto const start_location_idx = qg.random_active_location(
       nigiri_start_interval, ::nigiri::event_type::kDep);
   if (!start_location_idx.has_value()) {
-    std::cout << "WARNING: could not find active start location for interval\n";
-    return;
+    goto begin_randomize;
   }
+  auto const dest_location_idx = qg.random_active_location(
+      nigiri_dest_interval, ::nigiri::event_type::kArr);
+  if (!dest_location_idx.has_value()) {
+    goto begin_randomize;
+  }
+
+  // resolve start and destination indices
   auto const start_location_id =
       get_station_id(tags, qg.tt_, start_location_idx.value());
   auto const start_pos =
       to_motis_pos(qg.pos_near_start(start_location_idx.value()));
-
-  // destination
-  auto const dest_location_idx = qg.random_active_location(
-      nigiri_dest_interval, ::nigiri::event_type::kArr);
-  if (!dest_location_idx.has_value()) {
-    std::cout << "WARNING: could not find active destination for interval\n";
-    return;
-  }
   auto const dest_location_id =
       get_station_id(tags, qg.tt_, dest_location_idx.value());
   auto const dest_pos =
