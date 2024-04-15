@@ -53,7 +53,7 @@
 [ppr]
   url=git@github.com:motis-project/ppr.git
   branch=master
-  commit=29453edc1f37a29e24fcceab8adbfccce4ce80c5
+  commit=217585f424f6865693dd4aaa1a16f85daa574863
 [protobuf]
   url=git@github.com:motis-project/protobuf.git
   branch=main
@@ -73,7 +73,7 @@
 [tiles]
   url=git@github.com:motis-project/tiles.git
   branch=master
-  commit=abbf28537c2ac0271dc8e4e29ed47b0359265723
+  commit=64f297ea0f782d04c89e82c6d478a1dd453e5f70
 [transfers]
   url=git@github.com:motis-project/transfers.git
   branch=main
@@ -81,7 +81,7 @@
 [utl]
   url=git@github.com:motis-project/utl.git
   branch=master
-  commit=84347b2ef7105ec3106f5ff2a6aeca4c98eea5e2
+  commit=930d194f32a5da6c7d00e69bc53090548611c735
 [guess]
   url=git@github.com:motis-project/guess.git
   branch=master
@@ -110,3 +110,11 @@
   url=git@github.com:motis-project/valhalla.git
   branch=master
   commit=bcc77cb2746e3d234a34c73bd13880c32a96e6cc
+[osr]
+  url=git@github.com:motis-project/osr.git
+  branch=master
+  commit=0ec618deffbc251063f76b2a29d98beab86c1cd7
+[adr]
+  url=git@github.com:triptix-tech/adr.git
+  branch=master
+  commit=f044654571cfe5dd4cdd5260b16d9907dc270644

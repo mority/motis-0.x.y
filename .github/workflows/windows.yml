@@ -84,7 +84,7 @@ jobs:
           --dataset.begin 20151004
           --dataset.write_serialized false
           --nigiri.no_cache true
-          --exclude_modules address osrm parking path ppr tiles gbfs transfers
+          --exclude_modules address osrm parking path ppr tiles tripbased gbfs transfers valhalla osr adr
 
       - name: Run Tests
         if: matrix.config.webui == 'Off'
@@ -161,6 +161,9 @@ jobs:
           mv .\ppr-profiles dist
           mv .\tiles-profiles dist
           mv .\web dist
+          cd dist
+          7z a motis-windows.zip *
+          mv motis-windows.zip ..
 
       - name: Upload Distribution
         if: matrix.config.mode == 'Release'
