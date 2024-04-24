@@ -30,6 +30,10 @@ struct generator_settings : public conf::configuration {
   generator_settings() : configuration("Generator Options", "") {
     param(query_count_, "query_count", "number of queries to generate");
     param(out_, "out", "file to write generated queries to");
+    param(bbox_, "bbox",
+          "limit randomized locations to a bounding box, format: "
+          "lat_min,lon_min,lat_max,lon_max\ne.g., "
+          "36.0,-11.0,72.0,32.0\n(available via \"-b europe\")");
     param(start_modes_, "start_modes", "start modes ppr-15|osrm_car-15|...");
     param(dest_modes_, "dest_modes", "destination modes (see start modes)");
     param(message_type_, "message_type", "intermodal|routing");
@@ -99,6 +103,7 @@ struct generator_settings : public conf::configuration {
   int query_count_{1000};
   std::string message_type_{"intermodal"};
   std::string out_{"q_TARGET.txt"};
+  std::string bbox_;
   std::string start_modes_;
   std::string dest_modes_;
   std::string start_type_{"intermodal_pretrip"};
@@ -127,6 +132,40 @@ std::string replace_target_escape(std::string const& str,
   target_str.replace(esc_pos, kTargetEscape.size(), clean_target);
 
   return target_str;
+}
+
+std::vector<std::string> tokenize(std::string const& str, char delimiter,
+                                  std::uint32_t n_tokens) {
+  auto tokens = std::vector<std::string>{};
+  tokens.reserve(n_tokens);
+  auto start = 0U;
+  for (auto i = 0U; i != n_tokens; ++i) {
+    auto end = str.find(delimiter, start);
+    if (end == std::string::npos && i != n_tokens - 1U) {
+      break;
+    }
+    tokens.emplace_back(str.substr(start, end - start));
+    start = end + 1U;
+  }
+  return tokens;
+}
+
+std::optional<geo::box> parse_bbox(std::string const& str) {
+  using namespace geo;
+  if (str == "europe") {
+    return box{latlng{36.0, -11.0}, latlng{72.0, 32.0}};
+  }
+
+  auto const bbox_regex = std::regex{
+      "^[-+]?[0-9]*\\.?[0-9]+,[-+]?[0-9]*\\.?[0-9]+,[-+]?[0-9]*\\.?[0-9]+,[-+]?"
+      "[0-9]*\\.?[0-9]+$"};
+  if (!std::regex_match(begin(str), end(str), bbox_regex)) {
+    return std::nullopt;
+  }
+
+  auto const tokens = tokenize(str, ',', 4U);
+  return box{latlng{std::stod(tokens[0]), std::stod(tokens[1])},
+             latlng{std::stod(tokens[2]), std::stod(tokens[3])}};
 }
 
 struct mode {
@@ -277,41 +316,35 @@ void write_query(::nigiri::query_generation::generator& qg,
     return std::make_unique<module::message_creator>();
   });
 
-begin_randomize:
+  std::optional<::nigiri::routing::query> random_query;
+  while (!random_query.has_value()) {
+    random_query = qg.random_pretrip_query();
+  }
 
-  // unit of time designations of nigiri query time is [unixtime in minutes]
-  auto const start_time = qg.random_time();
-
-  ::nigiri::interval<::nigiri::unixtime_t> const nigiri_start_interval{
-      start_time, start_time + qg.s_.interval_size_};
-
-  ::nigiri::interval<::nigiri::unixtime_t> const nigiri_dest_interval{
-      start_time, start_time + ::nigiri::duration_t{1440U}};  // +24h
+  auto const nigiri_start_interval = std::visit(
+      utl::overloaded{
+          [](::nigiri::unixtime_t const& start_time) {
+            return ::nigiri::interval<::nigiri::unixtime_t>{start_time,
+                                                            start_time};
+          },
+          [](::nigiri::interval<::nigiri::unixtime_t> const& start_interval) {
+            return start_interval;
+          }},
+      random_query.value().start_time_);
 
   Interval const start_interval{to_motis_unixtime(nigiri_start_interval.from_),
                                 to_motis_unixtime(nigiri_start_interval.to_)};
 
   // randomize start and destination location indices
-  auto const start_location_idx = qg.random_active_location(
-      nigiri_start_interval, ::nigiri::event_type::kDep);
-  if (!start_location_idx.has_value()) {
-    goto begin_randomize;
-  }
-  auto const dest_location_idx = qg.random_active_location(
-      nigiri_dest_interval, ::nigiri::event_type::kArr);
-  if (!dest_location_idx.has_value()) {
-    goto begin_randomize;
-  }
+  auto const start_location_idx = random_query.value().start_[0].target();
+  auto const dest_location_idx = random_query.value().destination_[0].target();
 
   // resolve start and destination indices
   auto const start_location_id =
-      get_station_id(tags, qg.tt_, start_location_idx.value());
-  auto const start_pos =
-      to_motis_pos(qg.pos_near_start(start_location_idx.value()));
-  auto const dest_location_id =
-      get_station_id(tags, qg.tt_, dest_location_idx.value());
-  auto const dest_pos =
-      to_motis_pos(qg.pos_near_dest(dest_location_idx.value()));
+      get_station_id(tags, qg.tt_, start_location_idx);
+  auto const start_pos = to_motis_pos(qg.pos_near_start(start_location_idx));
+  auto const dest_location_id = get_station_id(tags, qg.tt_, dest_location_idx);
+  auto const dest_pos = to_motis_pos(qg.pos_near_dest(dest_location_idx));
 
   auto const get_destination = [&](flatbuffers::FlatBufferBuilder& fbb) {
     if (dest_type == intermodal::IntermodalDestination_InputPosition) {
@@ -326,8 +359,7 @@ begin_randomize:
   };
 
   auto const ontrip_train = [&]() {
-    auto const [tr, stop_idx] =
-        qg.random_transport_active_stop(::nigiri::event_type::kArr);
+    auto const [tr, stop_idx] = qg.random_transport_active_stop();
     auto const merged_trips_idx =
         qg.tt_.transport_to_trip_section_[tr.t_idx_].size() == 1
             ? qg.tt_.transport_to_trip_section_[tr.t_idx_]
@@ -686,17 +718,17 @@ int generate(int argc, char const** argv) {
   gs.extend_interval_earlier_ = generator_opt.extend_earlier_;
   gs.extend_interval_later_ = generator_opt.extend_later_;
   gs.min_connection_count_ = generator_opt.min_connection_count_;
-  gs.start_match_mode_ =
-      start_type == intermodal::IntermodalStart_IntermodalPretripStart ||
-              start_type == intermodal::IntermodalStart_IntermodalOntripStart
-          ? ::nigiri::routing::location_match_mode::kIntermodal
-          : ::nigiri::routing::location_match_mode::kEquivalent;
-  gs.dest_match_mode_ =
-      dest_type == intermodal::IntermodalDestination_InputPosition
-          ? ::nigiri::routing::location_match_mode::kIntermodal
-          : ::nigiri::routing::location_match_mode::kEquivalent;
+  gs.start_match_mode_ = ::nigiri::routing::location_match_mode::kEquivalent;
+  gs.dest_match_mode_ = ::nigiri::routing::location_match_mode::kEquivalent;
   gs.start_mode_ = get_transport_mode(start_modes);
   gs.dest_mode_ = get_transport_mode(dest_modes);
+  if (!generator_opt.bbox_.empty()) {
+    gs.bbox_ = parse_bbox(generator_opt.bbox_);
+    if (!gs.bbox_.has_value()) {
+      std::cout << "Error: bbox input malformed\n";
+      return 1;
+    }
+  }
   ::nigiri::query_generation::generator qg{tt, gs};
 
   // get nigiri tags from shared data
